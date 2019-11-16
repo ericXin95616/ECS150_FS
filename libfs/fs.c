@@ -97,7 +97,25 @@ int fs_mount(const char *diskname)
 
 int fs_umount(void)
 {
+  if(SB == NULL || FAT == NULL || Root == NULL){
+    return -1;
+  }
+  if(block_write(0,SB)==-1){
+    return -1;
+  }
+  for(int i=0; i<SB->FATblocks_num; i++){
+    if(block_write(1+i, FAT+(i*4096/2))==-1){
+      return -1;
+    }
+  }
+  if(block_write(SB->rootdir_idx, Root)==-1){
+    return -1;
+  }
+  free(SB);
+  free(FAT);
+  free(Root);
 
+  
   return 0;
 }
 
