@@ -7,6 +7,8 @@
 #include "disk.h"
 #include "fs.h"
 
+#define FAT_EOC 0xFFFF
+
 //SB is 4096 bytes
 typedef struct Superblock{
   uint8_t signature[8];
@@ -47,47 +49,56 @@ int fs_mount(const char *diskname)
 
   //Mounting Superblock
   SB = malloc(sizeof(Superblock));
-  if(SB == NULL) {return -1;}
-  block_read(0,SB);
+  if(SB == NULL) {
+    return -1;
+  }
+  if(block_read(0,SB) ==-1) {
+    free(SB);
+    return -1;
+  }
   //checking SB
-  if(memcmp(SB->signature,"ECS150FS",8)){
-    return -1;
-  }
-  if(SB->blocks_num!=block_disk_count()){
-    return -1;
-  }
   //sizeFat = db_num*2
   //blockFat = db_num*2/4096
-  if(SB->FATblocks_num!=(SB->db_num)*2/4096){
-    return -1;
-  }
-  if(SB->rootdir_idx!=SB->FATblocks_num+1){
-    return -1;
-  }
-  if(SB->dbstart_idx!=SB->rootdir_idx+1){
-    return -1;
-  }
-  if(SB->db_num!=SB->blocks_num-2-SB->FATblocks_num){
+  if(memcmp(SB->signature,"ECS150FS",8)!=0
+     || SB->blocks_num!=block_disk_count()
+     || SB->FATblocks_num!=(SB->db_num)*2/4096
+     || SB->rootdir_idx!=SB->FATblocks_num+1
+     || SB->dbstart_idx!=SB->rootdir_idx+1
+     || SB->db_num!=SB->blocks_num-2-SB->FATblocks_num){
+    free(SB);
     return -1;
   }
 
   //Mounting FAT
   FAT = malloc(SB->db_num*sizeof(uint16_t));
   for(int i=0; i<SB->FATblocks_num; i++){
-    block_read(1+i, FAT+(i*4096/2));//Pointer arithmetic moves by the size of the object being pointed to, in this case, 1 uint16_t is 2 bytes, thus 4096/2 integers
+    if(block_read(1+i, FAT+(i*4096/2))==-1){
+      return -1;
+    }//Pointer arithmetic moves by the size of the object being pointed to, in this case, 1 uint16_t is 2 bytes, thus 4096/2 integers
+  }
+  //checking FAT
+  if(FAT[0]!=FAT_EOC){
+    free(SB);
+    free(FAT);
+    return -1;
   }
 
   //Mounting Root_dir
   Root = malloc(sizeof(Root_dir));
-  block_read(SB->rootdir_idx, Root);
-
+  if(block_read(SB->rootdir_idx, Root)==-1){
+    free(SB);
+    free(FAT);
+    free(Root);
+    return -1;
+  }
 
   return 0;
 }
 
 int fs_umount(void)
 {
-return 0;
+
+  return 0;
 }
 
 int fs_info(void)
