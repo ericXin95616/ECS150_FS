@@ -35,17 +35,38 @@ typedef struct __attribute__((__packed__)) entryOfRootDirectory{
 
 typedef fileInfo* fileInfo_t;
 
+typedef struct file_buffer{
+    void *base;
+    void *end;
+    int count; //count how many fd is associated with this file
+}fb;
+
+typedef fb* fb_t;
+
+//whenever we create a file descriptor
+//we will buffer data of that file
+typedef struct file_descriptor{
+    int fileID;
+    fb_t file;
+    void *offset;
+}fileDes;
+
+typedef fileDes* fileDes_t;
+
 typedef struct virtualDisk{
     sBlock_t superBlock;
     uint16_t *arrFAT;
     fileInfo_t rootDir;
+    fileDes_t FDT;
+    int freeFd;
     int freeFATEntries;
     int freeRootEntries;
 }vDisk;
 
 static vDisk disk = {.superBlock = NULL,
                         .arrFAT = NULL,
-                        .rootDir = NULL};
+                        .rootDir = NULL,
+                        .FDT = NULL};
 
 int fs_mount(const char *diskname)
 {
@@ -135,30 +156,64 @@ int fs_mount(const char *diskname)
         return -1;
     }
 
+    //create FDT and initialize them
+    fileDes_t FDT = malloc(FS_OPEN_MAX_COUNT * sizeof(fileDes));
+    if(!FDT){
+        free(rootDir);
+        free(superBlock);
+        free(arrFAT);
+        perror("malloc");
+        return -1;
+    }
+    for (int l = 0; l < FS_OPEN_MAX_COUNT; ++l){
+        //we use -1 indicates that entry is free
+        FDT[l].fileID = -1;
+        FDT[l].file = NULL;
+        FDT[l].offset = NULL;
+    }
+
     //initialize global variable disk
     disk.superBlock = superBlock;
     disk.arrFAT = arrFAT;
     disk.rootDir = rootDir;
+    disk.FDT = FDT;
+    disk.freeFd = FS_OPEN_MAX_COUNT;
     disk.freeFATEntries = freeFATEntries;
     disk.freeRootEntries = freeRootEntries;
 
     return 0;
 }
 
+/*
+ * check if there are still file open
+ * Return 0 if FDT is empty
+ * Return -1 if FDT is not
+ */
+int check_FDT_empty()
+{
+    for (int i = 0; i < FS_OPEN_MAX_COUNT; ++i) {
+        if(disk.FDT[i].fileID != -1)
+            return -1;
+    }
+    return 0;
+}
+
 int fs_umount(void)
 {
     //no virtual disk is opened or disk close fail
-    if(!disk.superBlock || block_disk_close())
+    if(!disk.superBlock || check_FDT_empty() || block_disk_close())
         return -1;
 
-    //TODO: return -1 if there are still open file descriptor
     //free everything and quit
+    //all file has been close, so we can directly free FDT
     free(disk.superBlock);
     free(disk.arrFAT);
     free(disk.rootDir);
+    free(disk.FDT);
     disk.superBlock = NULL;
     disk.arrFAT = NULL;
     disk.rootDir = NULL;
+    disk.FDT = NULL;
     return 0;
 }
 
@@ -295,7 +350,25 @@ int fs_create(const char *filename)
  */
 int check_file_open(const char *filename)
 {
+    for (int i = 0; i < FS_OPEN_MAX_COUNT; ++i){
+        if(disk.FDT[i].fileID == -1)
+            continue;
+
+        int fid = disk.FDT[i].fileID;
+        if(strcmp(disk.rootDir[fid].filename, filename) == 0)
+            return 0;
+    }
     return -1;
+}
+
+int get_file_ID(const char *filename)
+{
+    int fileID;
+    for (fileID = 0; fileID < FS_FILE_MAX_COUNT; ++fileID) {
+        if(strcmp(disk.rootDir[fileID].filename, filename) == 0)
+            break;
+    }
+    return fileID;
 }
 
 int fs_delete(const char *filename)
@@ -307,11 +380,7 @@ int fs_delete(const char *filename)
     }
 
     //get index of @filename in root directory
-    int fileID;
-    for (fileID = 0; fileID < FS_FILE_MAX_COUNT; ++fileID) {
-        if(strcmp(disk.rootDir[fileID].filename, filename) == 0)
-            break;
-    }
+    int fileID = get_file_ID(filename);
     assert(fileID < FS_FILE_MAX_COUNT);
 
     //empty root directory entry
@@ -329,8 +398,8 @@ int fs_delete(const char *filename)
 
     ++disk.freeRootEntries;
 
-    write_back(disk.rootDir, disk.superBlock->rootIndex, 1);
-    write_back(disk.arrFAT, 1, disk.superBlock->numFATBlock);
+    assert(!write_back(disk.rootDir, disk.superBlock->rootIndex, 1));
+    assert(!write_back(disk.arrFAT, 1, disk.superBlock->numFATBlock));
     return 0;
 }
 
@@ -350,11 +419,39 @@ int fs_ls(void)
     return 0;
 }
 
+/**
+ * fs_open - Open a file
+ * @filename: File name
+ *
+ * Open file named @filename for reading and writing, and return the
+ * corresponding file descriptor. The file descriptor is a non-negative integer
+ * that is used subsequently to access the contents of the file. The file offset
+ * of the file descriptor is set to 0 initially (beginning of the file). If the
+ * same file is opened multiple files, fs_open() must return distinct file
+ * descriptors. A maximum of %FS_OPEN_MAX_COUNT files can be open
+ * simultaneously.
+ *
+ * Return: -1 if @filename is invalid, there is no file named @filename to open,
+ * or if there are already %FS_OPEN_MAX_COUNT files currently open. Otherwise,
+ * return the file descriptor.
+ */
 int fs_open(const char *filename)
 {
-    if(check_filename(filename)){
-        fs_error("Invalid filename: %s.", filename);
+    if(!disk.superBlock || check_filename(filename)
+        || check_file_exist(filename) || !disk.freeFd)
+    {
         return -1;
+    }
+
+    int fileID = get_file_ID(filename);
+    assert(fileID < FS_FILE_MAX_COUNT);
+
+    //get fd and check if this file is opened before
+    int fd = -1;
+    for (int i = 0; i < FS_OPEN_MAX_COUNT; ++i) {
+        //get first entry available
+        if(fd == -1 && disk.FDT[i].fileID == -1)
+            fd = i;
     }
 
     return 0;
