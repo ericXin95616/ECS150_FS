@@ -35,9 +35,10 @@ typedef struct __attribute__((__packed__)) entryOfRootDirectory{
 
 typedef fileInfo* fileInfo_t;
 
+//we guarantee that file buffer's cotent is always
+//the same as the cotent in the virtual disk
 typedef struct file_buffer{
     void *base;
-    void *end;
     int count; //count how many fd is associated with this file
 }fb;
 
@@ -184,24 +185,10 @@ int fs_mount(const char *diskname)
     return 0;
 }
 
-/*
- * check if there are still file open
- * Return 0 if FDT is empty
- * Return -1 if FDT is not
- */
-int check_FDT_empty()
-{
-    for (int i = 0; i < FS_OPEN_MAX_COUNT; ++i) {
-        if(disk.FDT[i].fileID != -1)
-            return -1;
-    }
-    return 0;
-}
-
 int fs_umount(void)
 {
     //no virtual disk is opened or disk close fail
-    if(!disk.superBlock || check_FDT_empty() || block_disk_close())
+    if(!disk.superBlock || disk.freeFd < FS_OPEN_MAX_COUNT || block_disk_close())
         return -1;
 
     //free everything and quit
@@ -419,22 +406,43 @@ int fs_ls(void)
     return 0;
 }
 
-/**
- * fs_open - Open a file
- * @filename: File name
+/*
+ * we read file @fileID from virtual disk to
+ * our program's memory, which makes it easy
+ * for us to manipulate that file. We guarantee
+ * that @fileID exist in the root directory.
  *
- * Open file named @filename for reading and writing, and return the
- * corresponding file descriptor. The file descriptor is a non-negative integer
- * that is used subsequently to access the contents of the file. The file offset
- * of the file descriptor is set to 0 initially (beginning of the file). If the
- * same file is opened multiple files, fs_open() must return distinct file
- * descriptors. A maximum of %FS_OPEN_MAX_COUNT files can be open
- * simultaneously.
+ * We should return fb_t that buffer all cotents
+ * of the file and its count should be 1
  *
- * Return: -1 if @filename is invalid, there is no file named @filename to open,
- * or if there are already %FS_OPEN_MAX_COUNT files currently open. Otherwise,
- * return the file descriptor.
+ * Note that the file we want to read can have
+ * a size of 0.
  */
+fb_t buffer_file(int fileID)
+{
+    fb_t bufferedFile = malloc(sizeof(fb));
+    bufferedFile->count = 1;
+
+     //special case: if file has the size of 0
+    if(disk.rootDir[fileID].size == 0){
+        bufferedFile->base = NULL;
+        return bufferedFile;
+    }
+
+     //general case
+    uint32_t numBlock = (disk.rootDir[fileID].size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    bufferedFile->base = malloc(numBlock * BLOCK_SIZE);
+    uint16_t blockIndex = disk.rootDir[fileID].startIndex;
+    int i = 0;
+    while(blockIndex != FAT_EOC){
+        block_read(blockIndex, (char*)bufferedFile->base + i*BLOCK_SIZE);
+        blockIndex = disk.arrFAT[blockIndex];
+        ++i;
+    }
+    assert(i == numBlock - 1);
+    return bufferedFile;
+}
+
 int fs_open(const char *filename)
 {
     if(!disk.superBlock || check_filename(filename)
@@ -447,31 +455,90 @@ int fs_open(const char *filename)
     assert(fileID < FS_FILE_MAX_COUNT);
 
     //get fd and check if this file is opened before
-    int fd = -1;
+    int fd = -1, prevFd = -1;
     for (int i = 0; i < FS_OPEN_MAX_COUNT; ++i) {
-        //get first entry available
-        if(fd == -1 && disk.FDT[i].fileID == -1)
-            fd = i;
+        //get first available entry
+        if(disk.FDT[i].fileID == -1) {
+            fd = (fd == -1) ? i : fd;
+            continue;
+        }
+        //for entries that is busy
+        if(disk.FDT[i].fileID == fileID){
+            //it means the file we want to open is already opened before
+            prevFd = i;
+        }
     }
 
+    assert(!disk.FDT[fd].file && !disk.FDT[fd].offset && disk.FDT[fd].fileID == -1);
+
+    //initialize file descriptor
+    disk.FDT[fd].fileID = fileID;
+    if(prevFd != -1){
+        disk.FDT[fd].file = disk.FDT[prevFd].file;
+        ++disk.FDT[fd].file->count;
+    } else {
+        disk.FDT[fd].file = buffer_file(fileID);
+    }
+    disk.FDT[fd].offset = disk.FDT[fd].file->base;
+
+    --disk.freeFd;
+    return fd;
+}
+
+/*
+ * check if input fd is valid or not
+ * return -1 if fd is invalid
+ * return 0 if fd is valid
+ */
+int check_fd(int fd)
+{
+    if(fd < 0 || fd >= FS_OPEN_MAX_COUNT || disk.FDT[fd].fileID == -1)
+        return -1;
     return 0;
 }
 
 int fs_close(int fd)
 {
-	/* TODO: Phase 3 */
+    if(!disk.superBlock || check_fd(fd))
+        return -1;
+
+    disk.FDT[fd].offset = NULL;
+    --(disk.FDT[fd].file->count);
+
+    //if count == 0, it means that there is no fd that is associated
+    //with the file, we should clear the buffer
+    if(!(disk.FDT[fd].file->count)){
+        //we don't need write back function, because whenever
+        //we change the cotent of a file, we will immediately
+        //write it back to virtual disk
+        free(disk.FDT[fd].file->base);
+        free(disk.FDT[fd].file);
+    }
+    disk.FDT[fd].file = NULL;
+    disk.FDT[fd].fileID = -1;
+
+    ++disk.freeFd;
     return 0;
 }
 
 int fs_stat(int fd)
 {
-	/* TODO: Phase 3 */
-    return 0;
+	if(!disk.superBlock || check_fd(fd))
+	    return -1;
+	int fileID = disk.FDT[fd].fileID;
+    return disk.rootDir[fileID].size;
 }
 
 int fs_lseek(int fd, size_t offset)
 {
-	/* TODO: Phase 3 */
+    if(!disk.superBlock || check_fd(fd))
+        return -1;
+    //check if offset is out of bound
+    int fileID = disk.FDT[fd].fileID;
+    if(offset > disk.rootDir[fileID].size)
+        return -1;
+    //set offset
+    disk.FDT[fd].offset = (char*)disk.FDT[fd].file->base + offset;
     return 0;
 }
 
