@@ -467,15 +467,181 @@ int fs_lseek(int fd, size_t offset)
     return 0;
 }
 
+/*
+ * These flags are used to helps us manage the behavior of fs_read and fs_write.
+ *
+ * BLOCK_END means offset of file is reaching the end of the buffered
+ * block. Therefore, we need to read/write to a new block
+ *
+ * FILE_END means offset of file is reaching the end of the file.
+ * For read operation, we need to stop reading and return the number
+ * of bytes we actually read.
+ * For write operation, we need to allocate new block in virtual disk
+ * for the file so that we can continue to write to the disk. If no space
+ * in the disk, write should be stopped and return the number of bytes we
+ * actually write.
+ *
+ * OP_END means the read/write operation ends normally, we need to
+ * return @count bytes.
+ */
+typedef enum end_flag{BLOCK_END, FILE_END, OP_END} end_flag;
+
+/*
+ * return the index of block where
+ * offset of @fd is located. We
+ * guarantee that fd is valid
+ */
+uint16_t get_offset_block(int fd)
+{
+    int fileID = disk.FDT[fd].fileID;
+    assert(disk.FDT[fd].offset >= 0 && disk.FDT[fd].offset <= disk.rootDir[fileID].size);
+
+    uint16_t blockIndex = disk.rootDir[fileID].startIndex;
+    size_t numBlock = (disk.FDT[fd].offset + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    for (size_t i = 0; i < numBlock; ++i) {
+        blockIndex = disk.arrFAT[blockIndex];
+    }
+    assert(blockIndex != FAT_EOC);
+    return blockIndex;
+}
+
+/*
+ * This function is the key to our fs_write and fs_read!
+ * return which end will come next
+ * @fd: File descriptor
+ * @count: Number of bytes needed to read
+ */
+end_flag next_end(int fd, size_t count)
+{
+    int fileID = disk.FDT[fd].fileID;
+    assert(disk.FDT[fd].offset >= 0 && disk.FDT[fd].offset <= disk.rootDir[fileID].size);
+
+    //TODO: +1 or not +1? This is a problem
+    size_t byteToBlockEnd = BLOCK_SIZE - (disk.FDT[fd].offset) % BLOCK_SIZE;
+    size_t byteToFileEnd = disk.rootDir[fileID].size - disk.FDT[fd].offset;
+
+    if(count < byteToBlockEnd){
+        if(count < byteToFileEnd)
+            return OP_END;
+        return FILE_END;
+    } else {
+        if(byteToBlockEnd < byteToFileEnd)
+            return BLOCK_END;
+        return FILE_END;
+    }
+}
+
+/*
+ * return cache offset given fd
+ */
+size_t get_cache_offset(int fd)
+{
+    int fileID = disk.FDT[fd].fileID;
+    assert(disk.FDT[fd].offset >= 0 && disk.FDT[fd].offset <= disk.rootDir[fileID].size);
+
+    size_t cache_offset = (disk.FDT[fd].offset) % BLOCK_SIZE;
+    return cache_offset;
+}
+
+/**
+ * fs_write - Write to a file
+ * @fd: File descriptor
+ * @buf: Data buffer to write in the file
+ * @count: Number of bytes of data to be written
+ *
+ * Attempt to write @count bytes of data from buffer pointer by @buf into the
+ * file referenced by file descriptor @fd. It is assumed that @buf holds at
+ * least @count bytes.
+ *
+ * When the function attempts to write past the end of the file, the file is
+ * automatically extended to hold the additional bytes. If the underlying disk
+ * runs out of space while performing a write operation, fs_write() should write
+ * as many bytes as possible. The number of written bytes can therefore be
+ * smaller than @count (it can even be 0 if there is no more space on disk).
+ *
+ * Return: -1 if file descriptor @fd is invalid (out of bounds or not currently
+ * open). Otherwise return the number of bytes actually written.
+ */
 int fs_write(int fd, void *buf, size_t count)
 {
-	/* TODO: Phase 4 */
+    if(!disk.superBlock || check_fd(fd))
+        return -1;
+
     return 0;
 }
 
+/**
+ * fs_read - Read from a file
+ * @fd: File descriptor
+ * @buf: Data buffer to be filled with data
+ * @count: Number of bytes of data to be read
+ *
+ * Attempt to read @count bytes of data from the file referenced by file
+ * descriptor @fd into buffer pointer by @buf. It is assumed that @buf is large
+ * enough to hold at least @count bytes.
+ *
+ * The number of bytes read can be smaller than @count if there are less than
+ * @count bytes until the end of the file (it can even be 0 if the file offset
+ * is at the end of the file). The file offset of the file descriptor is
+ * implicitly incremented by the number of bytes that were actually read.
+ *
+ * Return: -1 if file descriptor @fd is invalid (out of bounds or not currently
+ * open). Otherwise return the number of bytes actually read.
+ */
 int fs_read(int fd, void *buf, size_t count)
 {
-	/* TODO: Phase 4 */
-    return 0;
+	if(!disk.superBlock || check_fd(fd))
+	    return -1;
+
+	void *cache = malloc(BLOCK_SIZE);
+	if(!cache){
+	    perror("malloc");
+	    return -1;
+	}
+
+	//these are set up work
+    size_t buf_offset = 0;
+	size_t old_val_offset = disk.FDT[fd].offset;
+    size_t cache_offset = get_cache_offset(fd);
+    uint16_t blockIndex = 0;
+    end_flag flag = next_end(fd, count - buf_offset);
+
+    while(flag == BLOCK_END)
+	{
+        //read next block
+        blockIndex = get_offset_block(fd);
+        block_read(disk.superBlock->dataStartIndex + blockIndex, cache);
+        memcpy((char*)buf + buf_offset, (char*)cache + cache_offset, BLOCK_SIZE - cache_offset);
+        //update all variable accordingly
+        buf_offset += BLOCK_SIZE - cache_offset;
+	    disk.FDT[fd].offset += BLOCK_SIZE - cache_offset;
+	    cache_offset = 0;
+	    flag = next_end(fd, count - buf_offset);
+	}
+
+    int fileID = disk.FDT[fd].fileID;
+    size_t leftByte = (flag == OP_END) ? count - buf_offset : disk.rootDir[fileID].size - disk.FDT[fd].offset;
+
+    blockIndex = get_offset_block(fd);
+    block_read(disk.superBlock->dataStartIndex + blockIndex, cache);
+    memcpy((char*)buf + buf_offset, (char*)cache + cache_offset, leftByte);
+    disk.FDT[fd].offset += leftByte;
+
+    free(cache);
+    return disk.FDT[fd].offset - old_val_offset;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
