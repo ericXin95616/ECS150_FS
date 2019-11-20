@@ -485,6 +485,7 @@ int fs_lseek(int fd, size_t offset)
  * return @count bytes.
  */
 typedef enum end_flag{BLOCK_END, FILE_END, OP_END} end_flag;
+typedef enum operation{READ, WRITE} OP;
 
 /*
  * return the index of block where
@@ -600,49 +601,64 @@ size_t get_new_block(int fd, size_t count)
 }
 
 /*
+ * operate = either write or read
  * @fd: File descriptor
- * @buf: Data buffer to write
- * @buf_offset: Which data we want to write next
- * @count: Total number of data we want to write
- * @blockIndex: which data block we want to write
- * @cache_offset: Where we want to write in disk
+ * @buf: Data buffer to operate
+ * @buf_offset: Which data we want to operate next
+ * @count: Total number of data we want to operate
+ * @blockIndex: which data block we want to operate
+ * @cache_offset: Where we want to operate in disk
  * @flag: Which end will come next
  *
- * This function is meant to deal with mismatch write.
+ * This function is meant to deal with mismatch write and read.
  * If offset is not aligned to the beginning of the block
  * Or end does not aligned to the end of the block, this
  * function will be called.
  *
- * This function will not change anything, except writing
- * to disk.
+ * This function will not change anything to outside variable,
+ * except writing to disk.
  *
- * Return: Number of bytes that are actually written
+ * Return: Number of bytes that are actually operated
  */
-size_t mismatch_write(int fd, void *buf, size_t buf_offset, size_t count, uint16_t blockIndex,
-                      size_t cache_offset, end_flag flag)
+size_t mismatch_write_read(int fd, void *buf, size_t buf_offset, size_t count, uint16_t blockIndex,
+                      size_t cache_offset, end_flag flag, OP operation)
 {
     void *cache = malloc(BLOCK_SIZE);
     if (!cache)
         die_perror("malloc");
     block_read(blockIndex, cache);
 
-    //Calculate how many bytes we need to write
-    size_t writeByte;
+    //Calculate how many bytes we need to operate
+    size_t opByte;
     int fileID = disk.FDT[fd].fileID;
     if(flag == BLOCK_END) {
-        writeByte = BLOCK_SIZE - cache_offset;
+        opByte = BLOCK_SIZE - cache_offset;
     } else if (flag == FILE_END){
-        writeByte = disk.rootDir[fileID].size - disk.FDT[fd].offset;
+        opByte = disk.rootDir[fileID].size - disk.FDT[fd].offset;
     } else {
-        writeByte = count;
+        opByte = count;
     }
 
-    //write @writeByte bytes to the correct place
-    memcpy((char *)cache + cache_offset, (char *)buf + buf_offset, writeByte);
-    block_write(blockIndex, cache);
+    //based on operation, we decide what's dest and what's src
+    void *dest;
+    void *src;
+    if(operation == WRITE){
+        dest = (char *)cache + cache_offset;
+        src = (char *)buf + buf_offset;
+    } else {
+        dest = (char *)buf + buf_offset;
+        src = (char *)cache + cache_offset;
+    }
+
+    memcpy(dest, src, opByte);
+
+    //if operation is write, we need to write back to disk
+    if(operation == WRITE)
+        block_write(blockIndex, cache);
+
     free(cache);
 
-    return writeByte;
+    return opByte;
 }
 
 int fs_write(int fd, void *buf, size_t count)
@@ -679,7 +695,7 @@ int fs_write(int fd, void *buf, size_t count)
     while(flag == BLOCK_END) {
         blockIndex = get_offset_block(fd);
         if (cache_offset > 0) {
-            write_byte = mismatch_write(fd, buf, buf_offset, count, blockIndex, cache_offset, flag);
+            write_byte = mismatch_write_read(fd, buf, buf_offset, count, blockIndex, cache_offset, flag, WRITE);
         } else{
             assert(!block_write(blockIndex, (char*)buf + buf_offset));
             write_byte = BLOCK_SIZE;
@@ -693,7 +709,7 @@ int fs_write(int fd, void *buf, size_t count)
     }
 
     blockIndex = get_offset_block(fd);
-    write_byte = mismatch_write(fd, buf, buf_offset, count, blockIndex, cache_offset, flag);
+    write_byte = mismatch_write_read(fd, buf, buf_offset, count, blockIndex, cache_offset, flag, WRITE);
     disk.FDT[fd].offset += write_byte;
 
     //write dirty metadata back into the disk
@@ -702,45 +718,6 @@ int fs_write(int fd, void *buf, size_t count)
     if(get_block_num)
         assert(!write_back(disk.arrFAT, 1, disk.superBlock->numFATBlock));
     return disk.FDT[fd].offset - old_val_offset;
-}
-
-/*
- * @fd: File descriptor
- * @buf: Data buffer to write
- * @buf_offset: Which data we want to write next
- * @count: Total number of data we want to write
- * @blockIndex: which data block we want to write
- * @cache_offset: Where we want to write in disk
- * @flag: Which end will come next
- *
- * mismatch_read is quite similar to mismatch_write
- * Both of them is meant to handle mismatch operation.
- *
- * Return: Number of bytes we actually read
- */
-size_t mismatch_read(int fd, void *buf, size_t buf_offset, size_t count, uint16_t blockIndex,
-                     size_t cache_offset, end_flag flag)
-{
-    void *cache = malloc(BLOCK_SIZE);
-    if(!cache)
-        die_perror("malloc");
-    block_read(blockIndex, cache);
-
-    //Calculate how many bytes we want to read
-    size_t readByte;
-    int fileID = disk.FDT[fd].fileID;
-    if(flag == BLOCK_END) {
-        readByte = BLOCK_SIZE - cache_offset;
-    } else if (flag == FILE_END){
-        readByte = disk.rootDir[fileID].size - disk.FDT[fd].offset;
-    } else {
-        readByte = count;
-    }
-
-    memcpy((char*)buf + buf_offset, (char*)cache + cache_offset, readByte);
-    free(cache);
-
-    return readByte;
 }
 
 int fs_read(int fd, void *buf, size_t count)
@@ -761,7 +738,7 @@ int fs_read(int fd, void *buf, size_t count)
         blockIndex = get_offset_block(fd);
         //read next block
         if(cache_offset > 0){
-            readByte = mismatch_read(fd, buf, buf_offset, count, blockIndex, cache_offset, flag);
+            readByte = mismatch_write_read(fd, buf, buf_offset, count, blockIndex, cache_offset, flag, READ);
         } else {
             assert(!block_read(blockIndex, (char *)buf + buf_offset));
             readByte = BLOCK_SIZE;
@@ -775,7 +752,7 @@ int fs_read(int fd, void *buf, size_t count)
 	}
 
     blockIndex = get_offset_block(fd);
-    readByte = mismatch_read(fd, buf, buf_offset, count, blockIndex, cache_offset, flag);
+    readByte = mismatch_write_read(fd, buf, buf_offset, count, blockIndex, cache_offset, flag, READ);
     disk.FDT[fd].offset += readByte;
 
     return disk.FDT[fd].offset - old_val_offset;
