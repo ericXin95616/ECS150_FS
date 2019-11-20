@@ -556,6 +556,10 @@ size_t get_cache_offset(int fd)
  */
 size_t update_file_size(int fd, size_t count)
 {
+    int fileID = disk.FDT[fd].fileID;
+    if(disk.FDT[fd].offset + count <= disk.rootDir[fileID].size)
+        return disk.rootDir[fileID].size;
+    return disk.FDT[fd].offset + count;
 }
 
 /*
@@ -566,6 +570,33 @@ size_t update_file_size(int fd, size_t count)
  */
 size_t get_new_block(int fd, size_t count)
 {
+    int fileID = disk.FDT[fd].fileID;
+    uint16_t blockIndex = disk.rootDir[fileID].startIndex;
+
+    //move to the end of the linked list
+    while(blockIndex != FAT_EOC && disk.arrFAT[blockIndex] != FAT_EOC)
+        blockIndex = disk.arrFAT[blockIndex];
+
+    size_t blockAllocated = 0;
+    //disk.arrFAT[0] is always FAT_EOC, so we check from the second element
+    for (int i = 1; i < disk.superBlock->numDataBlock; ++i) {
+        if(blockAllocated >= count)
+            break;
+        if(disk.arrFAT[i] != 0)
+            continue;
+        //disk.arrFAT[i] == 0 and blockAllocated < count
+        if(blockIndex == FAT_EOC){
+            blockIndex = i;
+            disk.rootDir[fileID].startIndex = i;
+            continue;
+        }
+        disk.arrFAT[blockIndex] = i;
+        blockIndex = i;
+        ++blockAllocated;
+    }
+    disk.arrFAT[blockIndex] = FAT_EOC;
+    disk.freeFATEntries -= blockAllocated;
+    return blockAllocated;
 }
 
 /*
@@ -641,13 +672,15 @@ int fs_write(int fd, void *buf, size_t count)
 
     //First, we want to check if we need to allocate new blocks.
     //If we need, we allocate them beforehand
+    size_t old_val_size = disk.rootDir[fileID].size;
     size_t old_block_num = BLOCK_NUM(disk.rootDir[fileID].size);
     disk.rootDir[fileID].size = update_file_size(fd, count);
     size_t new_block_num = BLOCK_NUM(disk.rootDir[fileID].size);
+    size_t get_block_num = 0;
 
     //allocate new blocks for @fileID
     if(new_block_num > old_block_num) {
-        size_t get_block_num = get_new_block(fd, new_block_num - old_block_num);
+        get_block_num = get_new_block(fd, new_block_num - old_block_num);
         assert(get_block_num <= new_block_num - old_block_num);
         if (get_block_num < new_block_num - old_block_num)
             disk.rootDir[fileID].size = (old_block_num + get_block_num) * BLOCK_SIZE;
@@ -682,6 +715,11 @@ int fs_write(int fd, void *buf, size_t count)
     write_byte = mismatch_write(fd, buf, buf_offset, count, blockIndex, cache_offset, flag);
     disk.FDT[fd].offset += write_byte;
 
+    //write dirty metadata back into the disk
+    if(old_val_size != disk.rootDir[fileID].size)
+        assert(!write_back(disk.rootDir, disk.superBlock->rootIndex, 1));
+    if(get_block_num)
+        assert(!write_back(disk.arrFAT, 1, disk.superBlock->numFATBlock));
     return disk.FDT[fd].offset - old_val_offset;
 }
 
