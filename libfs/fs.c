@@ -585,6 +585,7 @@ size_t get_new_block(int fd, size_t count)
         if(disk.arrFAT[i] != 0)
             continue;
         //disk.arrFAT[i] == 0 and blockAllocated < count
+        ++blockAllocated;
         if(blockIndex == FAT_EOC){
             blockIndex = i;
             disk.rootDir[fileID].startIndex = i;
@@ -592,7 +593,6 @@ size_t get_new_block(int fd, size_t count)
         }
         disk.arrFAT[blockIndex] = i;
         blockIndex = i;
-        ++blockAllocated;
     }
     disk.arrFAT[blockIndex] = FAT_EOC;
     disk.freeFATEntries -= blockAllocated;
@@ -645,25 +645,7 @@ size_t mismatch_write(int fd, void *buf, size_t buf_offset, size_t count, uint16
 
     return writeByte;
 }
-/**
- * fs_write - Write to a file
- * @fd: File descriptor
- * @buf: Data buffer to write in the file
- * @count: Number of bytes of data to be written
- *
- * Attempt to write @count bytes of data from buffer pointer by @buf into the
- * file referenced by file descriptor @fd. It is assumed that @buf holds at
- * least @count bytes.
- *
- * When the function attempts to write past the end of the file, the file is
- * automatically extended to hold the additional bytes. If the underlying disk
- * runs out of space while performing a write operation, fs_write() should write
- * as many bytes as possible. The number of written bytes can therefore be
- * smaller than @count (it can even be 0 if there is no more space on disk).
- *
- * Return: -1 if file descriptor @fd is invalid (out of bounds or not currently
- * open). Otherwise return the number of bytes actually written.
- */
+
 int fs_write(int fd, void *buf, size_t count)
 {
     if(!disk.superBlock || check_fd(fd))
@@ -763,17 +745,3 @@ int fs_read(int fd, void *buf, size_t count)
     free(cache);
     return disk.FDT[fd].offset - old_val_offset;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
