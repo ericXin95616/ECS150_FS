@@ -11,8 +11,12 @@
 #define FAT_EOC 0xFFFF
 #define SIGNATURE "ECS150FS"
 
-#define fs_error(fmt, ...) \
-	fprintf(stderr, "%s: "fmt"\n", __func__, ##__VA_ARGS__)
+#define BLOCK_NUM(a) ((a + BLOCK_SIZE - 1)/BLOCK_SIZE)
+#define die_perror(msg)			\
+do {							\
+	perror(msg);				\
+	exit(1);					\
+} while (0)
 
 typedef struct __attribute__((__packed__)) superBlock{
     char signature[8];
@@ -66,13 +70,12 @@ int fs_mount(const char *diskname)
 
 	sBlock_t superBlock = malloc(BLOCK_SIZE);
 	if(!superBlock){
-	    perror("malloc");
-	    return -1;
+	    die_perror("malloc");
 	}
 	block_read(0, superBlock);
 
 	//error-checking super block
-	uint16_t correctFATBlock = (2 * superBlock->numDataBlock + BLOCK_SIZE - 1) / BLOCK_SIZE;
+	uint16_t correctFATBlock = BLOCK_NUM(2 * superBlock->numDataBlock);
 	uint16_t correctDataBlock = block_disk_count() - correctFATBlock - 2;
     //change char array to string
 	char *tmp = malloc(9);
@@ -96,8 +99,7 @@ int fs_mount(const char *diskname)
 	uint16_t *arrFAT = malloc(superBlock->numFATBlock * BLOCK_SIZE);
 	if(!arrFAT){
 	    free(superBlock);
-	    perror("malloc");
-	    return -1;
+	    die_perror("malloc");
 	}
 
     for (int i = 0; i < superBlock->numFATBlock; ++i)
@@ -122,8 +124,7 @@ int fs_mount(const char *diskname)
     if(!rootDir){
         free(superBlock);
         free(arrFAT);
-        perror("malloc");
-        return -1;
+        die_perror("malloc");
     }
     block_read(superBlock->rootIndex, rootDir);
 
@@ -153,8 +154,7 @@ int fs_mount(const char *diskname)
         free(rootDir);
         free(superBlock);
         free(arrFAT);
-        perror("malloc");
-        return -1;
+        die_perror("malloc");
     }
     for (int l = 0; l < FS_OPEN_MAX_COUNT; ++l){
         //we use -1 indicates that entry is free
@@ -485,6 +485,7 @@ int fs_lseek(int fd, size_t offset)
  * return @count bytes.
  */
 typedef enum end_flag{BLOCK_END, FILE_END, OP_END} end_flag;
+typedef enum operation{READ, WRITE} OP;
 
 /*
  * return the index of block where
@@ -497,13 +498,13 @@ uint16_t get_offset_block(int fd)
     assert(disk.FDT[fd].offset >= 0 && disk.FDT[fd].offset <= disk.rootDir[fileID].size);
 
     uint16_t blockIndex = disk.rootDir[fileID].startIndex;
-    size_t numBlock = (disk.FDT[fd].offset + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    size_t numBlock = disk.FDT[fd].offset / BLOCK_SIZE;
 
     for (size_t i = 0; i < numBlock; ++i) {
         blockIndex = disk.arrFAT[blockIndex];
     }
     assert(blockIndex != FAT_EOC);
-    return blockIndex;
+    return disk.superBlock->dataStartIndex + blockIndex;
 }
 
 /*
@@ -544,104 +545,211 @@ size_t get_cache_offset(int fd)
     return cache_offset;
 }
 
-/**
- * fs_write - Write to a file
+/*
  * @fd: File descriptor
- * @buf: Data buffer to write in the file
  * @count: Number of bytes of data to be written
+ * it will update the size of the file that fd
+ * associated with.
+ * If offset + count <= size, size of the file will no change
+ * If offset + count > size, size of the file will change
  *
- * Attempt to write @count bytes of data from buffer pointer by @buf into the
- * file referenced by file descriptor @fd. It is assumed that @buf holds at
- * least @count bytes.
- *
- * When the function attempts to write past the end of the file, the file is
- * automatically extended to hold the additional bytes. If the underlying disk
- * runs out of space while performing a write operation, fs_write() should write
- * as many bytes as possible. The number of written bytes can therefore be
- * smaller than @count (it can even be 0 if there is no more space on disk).
- *
- * Return: -1 if file descriptor @fd is invalid (out of bounds or not currently
- * open). Otherwise return the number of bytes actually written.
+ * Return: the size of the file
  */
+size_t update_file_size(int fd, size_t count)
+{
+    int fileID = disk.FDT[fd].fileID;
+    if(disk.FDT[fd].offset + count <= disk.rootDir[fileID].size)
+        return disk.rootDir[fileID].size;
+    return disk.FDT[fd].offset + count;
+}
+
+/*
+ * @fd: File descriptor
+ * @count: Number of blocks need to be allocate
+ *
+ * Return: Number of blocks that are actually allocated
+ */
+size_t get_new_block(int fd, size_t count)
+{
+    int fileID = disk.FDT[fd].fileID;
+    uint16_t blockIndex = disk.rootDir[fileID].startIndex;
+
+    //move to the end of the linked list
+    while(blockIndex != FAT_EOC && disk.arrFAT[blockIndex] != FAT_EOC)
+        blockIndex = disk.arrFAT[blockIndex];
+
+    size_t blockAllocated = 0;
+    //disk.arrFAT[0] is always FAT_EOC, so we check from the second element
+    for (int i = 1; i < disk.superBlock->numDataBlock; ++i) {
+        if(blockAllocated >= count)
+            break;
+        if(disk.arrFAT[i] != 0)
+            continue;
+        //disk.arrFAT[i] == 0 and blockAllocated < count
+        ++blockAllocated;
+        if(blockIndex == FAT_EOC){
+            blockIndex = i;
+            disk.rootDir[fileID].startIndex = i;
+            continue;
+        }
+        disk.arrFAT[blockIndex] = i;
+        blockIndex = i;
+    }
+    disk.arrFAT[blockIndex] = FAT_EOC;
+    disk.freeFATEntries -= blockAllocated;
+    return blockAllocated;
+}
+
+/*
+ * operate = either write or read
+ * @fd: File descriptor
+ * @buf: Data buffer to operate
+ * @buf_offset: Which data we want to operate next
+ * @count: Total number of data we want to operate
+ * @blockIndex: which data block we want to operate
+ * @cache_offset: Where we want to operate in disk
+ * @flag: Which end will come next
+ *
+ * This function is meant to deal with mismatch write and read.
+ * If offset is not aligned to the beginning of the block
+ * Or end does not aligned to the end of the block, this
+ * function will be called.
+ *
+ * This function will not change anything to outside variable,
+ * except writing to disk.
+ *
+ * Return: Number of bytes that are actually operated
+ */
+size_t mismatch_write_read(int fd, void *buf, size_t buf_offset, size_t count, uint16_t blockIndex,
+                      size_t cache_offset, end_flag flag, OP operation)
+{
+    void *cache = malloc(BLOCK_SIZE);
+    if (!cache)
+        die_perror("malloc");
+    block_read(blockIndex, cache);
+
+    //Calculate how many bytes we need to operate
+    size_t opByte;
+    int fileID = disk.FDT[fd].fileID;
+    if(flag == BLOCK_END) {
+        opByte = BLOCK_SIZE - cache_offset;
+    } else if (flag == FILE_END){
+        opByte = disk.rootDir[fileID].size - disk.FDT[fd].offset;
+    } else {
+        opByte = count;
+    }
+
+    //based on operation, we decide what's dest and what's src
+    void *dest;
+    void *src;
+    if(operation == WRITE){
+        dest = (char *)cache + cache_offset;
+        src = (char *)buf + buf_offset;
+    } else {
+        dest = (char *)buf + buf_offset;
+        src = (char *)cache + cache_offset;
+    }
+
+    memcpy(dest, src, opByte);
+
+    //if operation is write, we need to write back to disk
+    if(operation == WRITE)
+        block_write(blockIndex, cache);
+
+    free(cache);
+
+    return opByte;
+}
+
+/*
+ * @fd: File descriptor
+ * @buf: Data buffer
+ * @count: Number of bytes
+ * @operation: Which operation need to be performed
+ *
+ * this function is meant to combine the common part
+ * of fs_read and fs_write, so that it will be easier
+ * for us to debug or add new function.
+ *
+ * Return: the actual byte that is being read or written
+ */
+size_t disk_write_read(int fd, void *buf, size_t count, OP operation)
+{
+    //these are set up work
+    size_t buf_offset = 0;
+    size_t old_val_offset = disk.FDT[fd].offset;
+    size_t cache_offset = get_cache_offset(fd);
+    size_t opByte = 0;
+    uint16_t blockIndex = 0;
+    end_flag flag = next_end(fd, count);
+
+    while(flag == BLOCK_END)
+    {
+        blockIndex = get_offset_block(fd);
+        //read next block
+        if(cache_offset > 0){
+            opByte = mismatch_write_read(fd, buf, buf_offset, count, blockIndex, cache_offset, flag, operation);
+        } else {
+            if(operation == WRITE)
+                assert(!block_write(blockIndex, (char *)buf + buf_offset));
+            else
+                assert(!block_read(blockIndex, (char *)buf + buf_offset));
+            opByte = BLOCK_SIZE;
+        }
+
+        //update all variable accordingly
+        buf_offset += opByte;
+        disk.FDT[fd].offset += opByte;
+        cache_offset = get_cache_offset(fd);
+        flag = next_end(fd, count - buf_offset);
+    }
+
+    blockIndex = get_offset_block(fd);
+    opByte = mismatch_write_read(fd, buf, buf_offset, count, blockIndex, cache_offset, flag, operation);
+    disk.FDT[fd].offset += opByte;
+
+    return disk.FDT[fd].offset - old_val_offset;
+}
+
 int fs_write(int fd, void *buf, size_t count)
 {
     if(!disk.superBlock || check_fd(fd))
         return -1;
+    int fileID = disk.FDT[fd].fileID;
 
-    return 0;
+    //First, we want to check if we need to allocate new blocks.
+    //If we need, we allocate them beforehand
+    size_t old_val_size = disk.rootDir[fileID].size;
+    size_t old_block_num = BLOCK_NUM(disk.rootDir[fileID].size);
+    disk.rootDir[fileID].size = update_file_size(fd, count);
+    size_t new_block_num = BLOCK_NUM(disk.rootDir[fileID].size);
+    size_t get_block_num = 0;
+
+    //allocate new blocks for @fileID
+    if(new_block_num > old_block_num) {
+        get_block_num = get_new_block(fd, new_block_num - old_block_num);
+        assert(get_block_num <= new_block_num - old_block_num);
+        if (get_block_num < new_block_num - old_block_num)
+            disk.rootDir[fileID].size = (old_block_num + get_block_num) * BLOCK_SIZE;
+    }
+
+    size_t writeByte = disk_write_read(fd, buf, count, WRITE);
+
+    //write dirty metadata back into the disk
+    if(old_val_size != disk.rootDir[fileID].size)
+        assert(!write_back(disk.rootDir, disk.superBlock->rootIndex, 1));
+    if(get_block_num)
+        assert(!write_back(disk.arrFAT, 1, disk.superBlock->numFATBlock));
+
+    return writeByte;
 }
 
-/**
- * fs_read - Read from a file
- * @fd: File descriptor
- * @buf: Data buffer to be filled with data
- * @count: Number of bytes of data to be read
- *
- * Attempt to read @count bytes of data from the file referenced by file
- * descriptor @fd into buffer pointer by @buf. It is assumed that @buf is large
- * enough to hold at least @count bytes.
- *
- * The number of bytes read can be smaller than @count if there are less than
- * @count bytes until the end of the file (it can even be 0 if the file offset
- * is at the end of the file). The file offset of the file descriptor is
- * implicitly incremented by the number of bytes that were actually read.
- *
- * Return: -1 if file descriptor @fd is invalid (out of bounds or not currently
- * open). Otherwise return the number of bytes actually read.
- */
 int fs_read(int fd, void *buf, size_t count)
 {
 	if(!disk.superBlock || check_fd(fd))
 	    return -1;
 
-	void *cache = malloc(BLOCK_SIZE);
-	if(!cache){
-	    perror("malloc");
-	    return -1;
-	}
+    size_t readByte = disk_write_read(fd, buf, count, READ);
 
-	//these are set up work
-    size_t buf_offset = 0;
-	size_t old_val_offset = disk.FDT[fd].offset;
-    size_t cache_offset = get_cache_offset(fd);
-    uint16_t blockIndex = 0;
-    end_flag flag = next_end(fd, count - buf_offset);
-
-    while(flag == BLOCK_END)
-	{
-        //read next block
-        blockIndex = get_offset_block(fd);
-        block_read(disk.superBlock->dataStartIndex + blockIndex, cache);
-        memcpy((char*)buf + buf_offset, (char*)cache + cache_offset, BLOCK_SIZE - cache_offset);
-        //update all variable accordingly
-        buf_offset += BLOCK_SIZE - cache_offset;
-	    disk.FDT[fd].offset += BLOCK_SIZE - cache_offset;
-	    cache_offset = 0;
-	    flag = next_end(fd, count - buf_offset);
-	}
-
-    int fileID = disk.FDT[fd].fileID;
-    size_t leftByte = (flag == OP_END) ? count - buf_offset : disk.rootDir[fileID].size - disk.FDT[fd].offset;
-
-    blockIndex = get_offset_block(fd);
-    block_read(disk.superBlock->dataStartIndex + blockIndex, cache);
-    memcpy((char*)buf + buf_offset, (char*)cache + cache_offset, leftByte);
-    disk.FDT[fd].offset += leftByte;
-
-    free(cache);
-    return disk.FDT[fd].offset - old_val_offset;
+    return readByte;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
