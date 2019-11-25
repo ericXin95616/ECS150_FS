@@ -27,11 +27,6 @@ char diskname[FS_FILENAME_LEN];
 char filenames[FS_FILE_MAX_COUNT][FS_FILENAME_LEN];
 int num_input_files;
 
-void complex_test(void)
-{
-
-}
-
 /*
  * test cases:
  * 1, umount before mount
@@ -216,9 +211,24 @@ void stest_open_close()
     printf("Pass: simple test for fs_open and fs_delete.\n");
 }
 
+/*
+ * test case:
+ * 1, read/write before open
+ * 2, read/write after close
+ * 3, invalid input fd
+ * 4, read/write with offset does not align with
+ * the beginning of the block
+ * 5, read/write across multiple blocks
+ * 6, read when readable byte is smaller than @count
+ * 7, write pass the end of the file
+ * 8, write when there is not enough space in the disk
+ *
+ * Note that the last test case may be better tested
+ * by expanding test_fs_student.sh
+ */
 void stest_read_write(void)
 {
-
+    
 }
 
 void stest_seek_stat(void)
@@ -261,6 +271,4 @@ int main(int argc, char *argv[])
     num_input_files = --argc;
 
     simple_test();
-
-    complex_test();
 }
