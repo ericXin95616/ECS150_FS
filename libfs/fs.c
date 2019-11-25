@@ -623,6 +623,9 @@ size_t get_new_block(int fd, size_t count)
 size_t mismatch_write_read(int fd, void *buf, size_t buf_offset, size_t count, uint16_t blockIndex,
                       size_t cache_offset, end_flag flag, OP operation)
 {
+    if(count == buf_offset)
+        return 0;
+
     void *cache = malloc(BLOCK_SIZE);
     if (!cache)
         die_perror("malloc");
