@@ -31,6 +31,9 @@ do {							\
 char diskname[FS_FILENAME_LEN];
 char filenames[FS_OPEN_MAX_COUNT][FS_FILENAME_LEN];
 int num_input_files;
+char postfix[15] = "Only God knows";
+char str[15] = "Only     knows";
+char insert[4] = "God";
 
 /*
  * test cases:
@@ -278,10 +281,6 @@ void stest_read_write_stat(void)
     void *buf = malloc(FS_FILENAME_LEN);
     assert(fs_write(0, buf, FS_FILENAME_LEN) == -1);
 
-    //create all the input files
-    for (int m = 0; m < num_input_files; ++m) {
-        assert(!fs_create(filenames[m]));
-    }
     //open all the input files
     int fd[num_input_files];
     for (int j = 0; j < num_input_files; ++j) {
@@ -320,6 +319,19 @@ void stest_read_write_stat(void)
  */
 void append_postfix(int fd)
 {
+    //write post fix here
+    assert(!fs_lseek(fd, fs_stat(fd)));
+    assert(fs_write(fd, str, strlen(str)) == strlen(str));
+    assert(!fs_lseek(fd, fs_stat(fd) - 9));
+    assert(fs_write(fd, insert, strlen(insert)) == strlen(insert));
+
+    //read post fix out
+    assert(!fs_lseek(fd, fs_stat(fd) - strlen(postfix)));
+    void *buf = malloc(BLOCK_SIZE);
+    memset(buf, 0, BLOCK_SIZE);
+    assert(fs_read(fd, buf, BLOCK_SIZE) == strlen(postfix));
+
+    assert(strcmp(postfix, buf) == 0);
 }
 
 /*
@@ -337,6 +349,7 @@ void stest_lseek(void)
     int fd[num_input_files];
     for (int i = 0; i < num_input_files; ++i) {
         fd[i] = fs_open(filenames[i]);
+        assert(fd[i] >= 0 && fd[i] < FS_OPEN_MAX_COUNT);
     }
 
     for (int j = 0; j < num_input_files; ++j) {
@@ -344,10 +357,11 @@ void stest_lseek(void)
     }
 
     for (int k = 0; k < num_input_files; ++k) {
-        fs_close(fd[k]);
+        assert(!fs_close(fd[k]));
     }
 
     fs_umount();
+    printf("Pass: simple test for fs_lseek.\n");
 }
 
 /*
@@ -378,10 +392,8 @@ int main(int argc, char *argv[])
     ++argv;
 
     strcpy(diskname, argv[0]);
-    printf("%s\n", diskname);
     for (int i = 1; i < argc; ++i) {
         strcpy(filenames[i-1], argv[i]);
-        printf("%s\n",filenames[i]);
     }
     num_input_files = --argc;
 
