@@ -10,7 +10,7 @@ numbers of free entries in different fields.
 There's also structs for Root Directory and
 Super Block.
 
-### fs_mount
+### `fs_mount`
 First, we use the given `block_disk_open` to open
 a disk of the specified name. Then we read in
 the super block into our super block struct, and 
@@ -24,11 +24,11 @@ and initialize the file descriptor table.
 Finally, we put everything together in the 
 global variable virtual disk `disk`.
 
-### fs_umount
+### `fs_umount`
 Upon umount, we free every field that we put in
 `disk` in `fs_mount` and return.
 
-### fs_info
+### `fs_info`
 In `fs_info`, we print out the required fields
 in the virtual disk that we saved as a global
 variable. For the free ratio part, we calculate
@@ -50,7 +50,7 @@ back the changed metadata about the disk.
 opened. `get_file_ID` gets the file id of a file
 of a certain file name.
 
-### fs_create
+### `fs_create`
 First, we check if the super block is valid, if the
 file name is legal, if the file name isn't there yet,
 or if the disk doesn't have anymore free entries. If
@@ -62,7 +62,7 @@ Then we update the free root entries number.
 Finally, we write everything that we just changed 
 back to the disk.
 
-### fs_delete
+### `fs_delete`
 First, we go through the checking process that's 
 similar in `fs_create`, while also checking if
 the file is already opened. Once we passed the 
@@ -74,7 +74,7 @@ number of free root entries. Finally, we write
 the newly changed information of root directory
 and FAT array with `write_back` back to the disk.
 
-### fs_ls
+### `fs_ls`
 We use a for look in root directory to find non-null
 file names. If a file name is non-null, we print out
 the file name, size, and its start index.
@@ -181,4 +181,59 @@ the changed metadata back into the disk with the
 `write_back` function that we implemented earilier.
 
 ## Testing
+We wrote two test files, one of them is the c file
+and the other one is the shell script. Both scripts
+are extensively commented.
+
+### my_fs_tester.c
+This is the unit test file. In this file, we tested
+#### phase 1:
+ 1, umount before mount
+ 2, umount after umount
+ 3, mount twice
+ 4, open a file and umount
+#### phase 2:
+ 1, create/delete before mount
+ 2, create/delete after umount
+ 3, invalid input filename
+ 4, create: filename already exist
+    delete: filename does not exist
+ 5, create when disk root directory is full
+ 6, delete when current file name is opened
+#### phase 3:
+1, open/close before mount
+2, open/close after umount
+3, open/close before create
+4, open/close after delete
+5, close before open
+6, close after close
+7, open multiple times, check if fd is different
+8, open when FDT is full
+9, close with invalid fd
+##### fs_lseek
+1, lseek before open
+2, lseek after close
+3, invalid offset
+4, append something
+5, write something in the mid of a file
+#### phase 4:
+1, read/write before open
+2, read/write after close
+3, invalid input fd
+4. buf is null and count is 0?
+5, read/write with offset does not align with
+the beginning of the block
+6, read/write across multiple blocks
+7, read when readable byte is smaller than @count
+8, write pass the end of the file
+9, write when there is not enough space in the disk
+### my_fs_tester.sh
+There are four tests in the shell script.
+The first one is the unit test specified above.
+The second one is a general test that compares output
+and disk content of add, info, ls, stat and cat.
+The third one is testing the corner case when the
+disk doesn't have enough space.
+The last one tests the erroneous case where user tries
+to load something that's not disk.
 
