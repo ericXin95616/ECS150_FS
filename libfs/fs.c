@@ -718,6 +718,9 @@ int fs_write(int fd, void *buf, size_t count)
 {
     if(!disk.superBlock || check_fd(fd))
         return -1;
+    if(!count)
+        return 0;
+
     int fileID = disk.FDT[fd].fileID;
 
     //First, we want to check if we need to allocate new blocks.
@@ -751,6 +754,8 @@ int fs_read(int fd, void *buf, size_t count)
 {
 	if(!disk.superBlock || check_fd(fd))
 	    return -1;
+    if(!count)
+        return 0;
 
     size_t readByte = disk_write_read(fd, buf, count, READ);
 

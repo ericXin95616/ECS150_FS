@@ -7,6 +7,11 @@
 #include <fs.h>
 #include <assert.h>
 #include <stdint.h>
+#include <disk.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <zconf.h>
 
 #define test_fs_error(fmt, ...) \
 	fprintf(stderr, "%s: "fmt"\n", __func__, ##__VA_ARGS__)
@@ -24,8 +29,11 @@ do {							\
 } while (0)
 
 char diskname[FS_FILENAME_LEN];
-char filenames[FS_FILE_MAX_COUNT][FS_FILENAME_LEN];
+char filenames[FS_OPEN_MAX_COUNT][FS_FILENAME_LEN];
 int num_input_files;
+char postfix[15] = "Only God knows";
+char str[15] = "Only     knows";
+char insert[4] = "God";
 
 /*
  * test cases:
@@ -212,29 +220,150 @@ void stest_open_close()
 }
 
 /*
+ * this is the helping function of stest_read_write
+ */
+void read_after_write(int myfd, char *filename)
+{
+    //this code from Professor Porquet
+    int fd = open(filename, O_RDONLY);
+    struct stat st;
+    if (fd < 0)
+        die_perror("open");
+    if (fstat(fd, &st))
+        die_perror("fstat");
+    if (!S_ISREG(st.st_mode))
+        die("Not a regular file: %s\n", filename);
+
+    /* Map file into buffer */
+    void *write_buf = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (!write_buf)
+        die_perror("mmap");
+
+    //use our own file system to do write and read
+    assert(fs_write(myfd, write_buf, st.st_size) >= 0);
+
+    void *read_buf = malloc(fs_stat(myfd));
+    fs_lseek(myfd, 0);
+    assert(fs_read(myfd, read_buf, fs_stat(myfd)) == fs_stat(myfd));
+
+    //compare if read memory is the same as write memory
+    assert(!memcmp(write_buf, read_buf, fs_stat(myfd)));
+
+    munmap(write_buf, st.st_size);
+    free(read_buf);
+    close(fd);
+}
+
+/*
  * test case:
  * 1, read/write before open
  * 2, read/write after close
  * 3, invalid input fd
- * 4, read/write with offset does not align with
+ * 4. buf is null and count is 0?
+ * 5, read/write with offset does not align with
  * the beginning of the block
- * 5, read/write across multiple blocks
- * 6, read when readable byte is smaller than @count
- * 7, write pass the end of the file
- * 8, write when there is not enough space in the disk
+ * 6, read/write across multiple blocks
+ * 7, read when readable byte is smaller than @count
+ * 8, write pass the end of the file
+ * 9, write when there is not enough space in the disk
  *
  * Note that the last test case may be better tested
  * by expanding test_fs_student.sh
  */
-void stest_read_write(void)
+void stest_read_write_stat(void)
 {
-    
+    fs_mount(diskname);
+    for (int i = 0; i < num_input_files; ++i) {
+        fs_create(filenames[i]);
+    }
+
+    //case 1
+    void *buf = malloc(FS_FILENAME_LEN);
+    assert(fs_write(0, buf, FS_FILENAME_LEN) == -1);
+
+    //open all the input files
+    int fd[num_input_files];
+    for (int j = 0; j < num_input_files; ++j) {
+        fd[j] = fs_open(filenames[j]);
+        assert(fd[j] != -1);
+    }
+
+    //case 3 and 4
+    assert(fs_write(-1, buf, FS_FILENAME_LEN) == -1);
+    assert(fs_write(FS_OPEN_MAX_COUNT, buf, FS_FILENAME_LEN) == -1);
+    assert(!fs_write(fd[0], NULL, 0));
+
+    //case 5-9
+    for (int l = 0; l < num_input_files; ++l) {
+        read_after_write(fd[l], filenames[l]);
+    }
+
+    //close all the input files
+    for (int k = 0; k < num_input_files; ++k) {
+        assert(!fs_close(fd[k]));
+    }
+
+    //case 2
+    assert(fs_write(0, buf, FS_FILENAME_LEN) == -1);
+
+    free(buf);
+    fs_umount();
+
+    printf("Pass: simple test for fs_read and fs_write.\n");
 }
 
-void stest_seek_stat(void)
+/*
+ * this is a helper function for stest_lseek
+ * fd's offset is guarantee to be 0
+ * we want to append a postfix into @fd
+ */
+void append_postfix(int fd)
 {
+    //write post fix here
+    assert(!fs_lseek(fd, fs_stat(fd)));
+    assert(fs_write(fd, str, strlen(str)) == strlen(str));
+    assert(!fs_lseek(fd, fs_stat(fd) - 9));
+    assert(fs_write(fd, insert, strlen(insert)) == strlen(insert));
 
+    //read post fix out
+    assert(!fs_lseek(fd, fs_stat(fd) - strlen(postfix)));
+    void *buf = malloc(BLOCK_SIZE);
+    memset(buf, 0, BLOCK_SIZE);
+    assert(fs_read(fd, buf, BLOCK_SIZE) == strlen(postfix));
+
+    assert(strcmp(postfix, buf) == 0);
 }
+
+/*
+ * test case:
+ * 1, lseek before open
+ * 2, lseek after close
+ * 3, invalid offset
+ * 4, append something
+ * 5, write something in the mid of a file
+ */
+void stest_lseek(void)
+{
+    fs_mount(diskname);
+
+    int fd[num_input_files];
+    for (int i = 0; i < num_input_files; ++i) {
+        fd[i] = fs_open(filenames[i]);
+        assert(fd[i] >= 0 && fd[i] < FS_OPEN_MAX_COUNT);
+    }
+
+    for (int j = 0; j < num_input_files; ++j) {
+        append_postfix(fd[j]);
+    }
+
+    for (int k = 0; k < num_input_files; ++k) {
+        assert(!fs_close(fd[k]));
+    }
+
+    fs_umount();
+    printf("Pass: simple test for fs_lseek.\n");
+}
+
 /*
  * this is the simple test of file system
  * in every test cases, we guarantee that
@@ -249,9 +378,9 @@ void simple_test(void)
 
     stest_open_close();
 
-    stest_read_write();
+    stest_read_write_stat();
 
-    stest_seek_stat();
+    stest_lseek();
 }
 
 int main(int argc, char *argv[])
@@ -263,10 +392,8 @@ int main(int argc, char *argv[])
     ++argv;
 
     strcpy(diskname, argv[0]);
-    printf("%s\n", diskname);
     for (int i = 1; i < argc; ++i) {
         strcpy(filenames[i-1], argv[i]);
-        printf("%s\n",filenames[i]);
     }
     num_input_files = --argc;
 
