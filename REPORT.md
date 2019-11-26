@@ -10,7 +10,7 @@ numbers of free entries in different fields.
 There's also structs for Root Directory and
 Super Block.
 
-###fs_mount
+### fs_mount
 First, we use the given `block_disk_open` to open
 a disk of the specified name. Then we read in
 the super block into our super block struct, and 
@@ -24,11 +24,11 @@ and initialize the file descriptor table.
 Finally, we put everything together in the 
 global variable virtual disk `disk`.
 
-###fs_umount
+### fs_umount
 Upon umount, we free every field that we put in
 `disk` in `fs_mount` and return.
 
-###fs_info
+### fs_info
 In `fs_info`, we print out the required fields
 in the virtual disk that we saved as a global
 variable. For the free ratio part, we calculate
@@ -50,7 +50,7 @@ back the changed metadata about the disk.
 opened. `get_file_ID` gets the file id of a file
 of a certain file name.
 
-###fs_create
+### fs_create
 First, we check if the super block is valid, if the
 file name is legal, if the file name isn't there yet,
 or if the disk doesn't have anymore free entries. If
@@ -62,7 +62,7 @@ Then we update the free root entries number.
 Finally, we write everything that we just changed 
 back to the disk.
 
-###fs_delete
+### fs_delete
 First, we go through the checking process that's 
 similar in `fs_create`, while also checking if
 the file is already opened. Once we passed the 
@@ -74,7 +74,7 @@ number of free root entries. Finally, we write
 the newly changed information of root directory
 and FAT array with `write_back` back to the disk.
 
-###fs_ls
+### fs_ls
 We use a for look in root directory to find non-null
 file names. If a file name is non-null, we print out
 the file name, size, and its start index.
@@ -84,7 +84,7 @@ We used one helper function `check_fd` here, which
 helps us check if the input file descriptor is 
 valid or not.
 
-###`fs_open`
+### `fs_open`
 First we check all the conditions, including if the
 super block is valid, if the file name is legal, if
 the file exists, or there's enough free file 
@@ -94,19 +94,19 @@ that it's empty, and initialize the file descriptor.
 Finally, we update the number of free file 
 descriptors.
 
-###`fs_close`
+### `fs_close`
 We make sure there is a super block and the file is
 opened. After that, we erase the information on 
 file descriptor and update the number of free file
 descriptors.
 
-###`fs_stat`
+### `fs_stat`
 In this function, after making sure the file is 
 opend, we simply find the file id bythe index 
 of file descriptor in the FDT, and then find 
 the file size by the file id.
 
-###`fs_lseek`
+### `fs_lseek`
 We check if the file is opened, and then set the
 offset after making sure the offset is not larger
 than it's supposed to be.
@@ -144,7 +144,7 @@ linked list in array of FAT.
 needed in array of FAT for the writing task, 
 which will be discussed later.
 
-###`disk_write_read`
+### `disk_write_read`
 This function combined the common part of fs_read
 and fs_write. In this function, we read/write
 (depends on the opcode) block by block with 
@@ -152,16 +152,8 @@ and fs_write. In this function, we read/write
 of the file doesn't match the beginning/
 end of a block exactly, we use the 
 `mismatch_write_read` to deal with that part.
-----------------------------------
-|   blk1   |   blk2   |    blk3  |
-|          |          |          |
-|	 |-----|----------|-----|    |
-|____|_____|__________|_____|____|
- off |     |          |     |  end
-     |-----|----------|-----|
-     mismatch          mismatch
 
-###`mismatch_write_read`
+### `mismatch_write_read`
 First we do the validation check, and then we
 initialize a block cache and read the block into
 this cache. Then we calculate how many bytes
@@ -172,13 +164,13 @@ the actual data transfer. In the end, if we are
 writing, we need to write the write the dirty block
 back to the disk with `block_write`.
 
-###`fs_read`
+### `fs_read`
 We first check if the file is opened, or if the
 file size is not zero. After all conditions are
 satisfied, we use the `disk_write_read` function
 with operation code `READ`.
 
-###`fs_write`
+### `fs_write`
 After the validation check, we first calculate 
 if this writing requires allocation of new blocks.
 If so, we allocte the new blocks with 
@@ -188,5 +180,5 @@ to deal with the actual writing. Finally, we update
 the changed metadata back into the disk with the 
 `write_back` function that we implemented earilier.
 
-##Testing
+## Testing
 
