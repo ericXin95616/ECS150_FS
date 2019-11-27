@@ -148,7 +148,7 @@ which will be discussed later.
 This function combined the common part of fs_read
 and fs_write. In this function, we read/write
 (depends on the opcode) block by block with 
-`block_write` and `block_read`. if theoffset/end 
+`block_write` and `block_read`. if the offset/end 
 of the file doesn't match the beginning/
 end of a block exactly, we use the 
 `mismatch_write_read` to deal with that part.
@@ -236,4 +236,5 @@ The third one is testing the corner case when the
 disk doesn't have enough space.
 The last one tests the erroneous case where user tries
 to load something that's not disk.
-
+Note that user should call "make" before executing this
+bash script.
